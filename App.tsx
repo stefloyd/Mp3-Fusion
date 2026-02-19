@@ -15,6 +15,7 @@ const App: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [analyzingTrackId, setAnalyzingTrackId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number>(0);
   
   // Crossfade state (default 3 seconds)
   const [crossfade, setCrossfade] = useState<number>(3);
@@ -46,6 +47,7 @@ const App: React.FC = () => {
       setMergedBlob(null);
       setPreviewUrl(null);
       setStatus(MergeStatus.IDLE);
+      setProgress(0);
 
       // Calculate duration for each track asynchronously
       newTracks.forEach(async (track) => {
@@ -77,6 +79,7 @@ const App: React.FC = () => {
         setStatus(MergeStatus.IDLE);
         setMergedBlob(null);
         setPreviewUrl(null);
+        setProgress(0);
     }
   };
   
@@ -88,6 +91,7 @@ const App: React.FC = () => {
           setStatus(MergeStatus.IDLE);
           setAiMetadata(null);
           setErrorMsg(null);
+          setProgress(0);
       }
   };
 
@@ -129,9 +133,12 @@ const App: React.FC = () => {
     }
     setErrorMsg(null);
     setStatus(MergeStatus.PROCESSING);
+    setProgress(0);
     
     try {
-      const blob = await mergeAudioTracks(tracks, crossfade);
+      const blob = await mergeAudioTracks(tracks, crossfade, (percent) => {
+          setProgress(Math.round(percent));
+      });
       setMergedBlob(blob);
       
       // Create preview URL
@@ -288,7 +295,7 @@ const App: React.FC = () => {
                   </div>
                   <div>
                     <h4 className="font-semibold text-indigo-100">AI Assistant</h4>
-                    <p className="text-xs text-indigo-300">Genera titolo, copertina e cerca video</p>
+                    <p className="text-xs text-indigo-300">Genera titolo, copertina (16:9) e cerca video</p>
                   </div>
                </div>
                <button 
@@ -310,7 +317,7 @@ const App: React.FC = () => {
 
                 <div className="flex flex-col md:flex-row gap-6 relative z-10">
                   {aiMetadata.coverImageBase64 && (
-                    <div className="group relative w-full md:w-48 md:h-48 flex-shrink-0 bg-slate-900 rounded-lg overflow-hidden border border-slate-700 shadow-xl">
+                    <div className="group relative w-full md:w-80 md:aspect-video flex-shrink-0 bg-slate-900 rounded-lg overflow-hidden border border-slate-700 shadow-xl">
                         <img 
                           src={`data:image/jpeg;base64,${aiMetadata.coverImageBase64}`} 
                           alt="Cover Art" 
@@ -322,7 +329,7 @@ const App: React.FC = () => {
                               onClick={() => {
                                 const link = document.createElement('a');
                                 link.href = `data:image/jpeg;base64,${aiMetadata.coverImageBase64}`;
-                                link.download = `${aiMetadata.title.replace(/[^a-z0-9]/gi, '_')}_cover.jpg`;
+                                link.download = `${aiMetadata.title.replace(/[^a-z0-9]/gi, '_')}_thumbnail.jpg`;
                                 link.click();
                               }}
                               className="p-2 bg-white/20 hover:bg-white/30 rounded-full text-white backdrop-blur-sm transition-colors"
@@ -349,13 +356,13 @@ const App: React.FC = () => {
                             onClick={() => {
                               const link = document.createElement('a');
                               link.href = `data:image/jpeg;base64,${aiMetadata.coverImageBase64}`;
-                              link.download = `${aiMetadata.title.replace(/[^a-z0-9]/gi, '_')}_cover.jpg`;
+                              link.download = `${aiMetadata.title.replace(/[^a-z0-9]/gi, '_')}_thumbnail.jpg`;
                               link.click();
                             }}
                             className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium rounded-lg transition-colors flex items-center gap-2 border border-slate-600"
                           >
                             <ImageIcon size={14} />
-                            Scarica Copertina
+                            Scarica Thumbnail (16:9)
                           </button>
                         )}
                         
@@ -430,7 +437,24 @@ const App: React.FC = () => {
               </div>
             )}
 
-            <div className="flex flex-col sm:flex-row gap-4 justify-end">
+            <div className="flex flex-col sm:flex-row gap-4 justify-end items-center">
+              
+              {/* Progress Bar (Visible during processing) */}
+              {status === MergeStatus.PROCESSING && (
+                <div className="flex-1 w-full mr-4">
+                  <div className="flex justify-between text-xs text-slate-400 mb-1">
+                    <span>Elaborazione in corso...</span>
+                    <span>{progress}%</span>
+                  </div>
+                  <div className="w-full bg-slate-700 rounded-full h-2.5 overflow-hidden">
+                    <div 
+                      className="bg-emerald-500 h-2.5 rounded-full transition-all duration-300 ease-out" 
+                      style={{ width: `${progress}%` }}
+                    ></div>
+                  </div>
+                </div>
+              )}
+
               <button
                 onClick={handleMerge}
                 disabled={tracks.length < 2 || status === MergeStatus.PROCESSING}
@@ -443,7 +467,7 @@ const App: React.FC = () => {
                 {status === MergeStatus.PROCESSING ? (
                   <>
                     <Loader2 className="animate-spin" size={20} />
-                    <span>Elaborazione...</span>
+                    <span>{progress}%</span>
                   </>
                 ) : (
                   <>

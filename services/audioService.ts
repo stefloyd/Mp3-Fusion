@@ -23,13 +23,22 @@ self.onmessage = function(e) {
   
   const mp3Data = [];
   const sampleBlockSize = 1152;
+  const totalSamples = samplesLeft.length;
   
-  for (let i = 0; i < samplesLeft.length; i += sampleBlockSize) {
+  for (let i = 0; i < totalSamples; i += sampleBlockSize) {
     const leftChunk = samplesLeft.subarray(i, i + sampleBlockSize);
     const rightChunk = samplesRight.subarray(i, i + sampleBlockSize);
     const mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
     if (mp3buf.length > 0) {
       mp3Data.push(mp3buf);
+    }
+    
+    // Report progress every ~50 chunks to avoid flooding the main thread
+    if (i % (sampleBlockSize * 50) === 0) {
+      self.postMessage({ 
+        type: 'progress', 
+        progress: i / totalSamples 
+      });
     }
   }
   
@@ -38,7 +47,7 @@ self.onmessage = function(e) {
     mp3Data.push(mp3buf);
   }
   
-  self.postMessage({ mp3Data });
+  self.postMessage({ type: 'done', mp3Data });
 };
 `;
 
@@ -81,29 +90,44 @@ export const calculateOptimalVolume = async (file: File, targetRms: number = 0.1
   }
 };
 
-export const mergeAudioTracks = async (tracks: AudioTrack[], crossfadeDuration: number = 0): Promise<Blob> => {
+export const mergeAudioTracks = async (
+  tracks: AudioTrack[], 
+  crossfadeDuration: number = 0,
+  onProgress?: (percentage: number) => void
+): Promise<Blob> => {
   if (tracks.length === 0) throw new Error("No tracks to merge");
+
+  const updateProgress = (p: number) => {
+    if (onProgress) onProgress(Math.min(100, Math.max(0, p)));
+  };
+
+  updateProgress(1); // Start
 
   const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
   const audioCtx = new AudioContext();
 
-  // 1. Decode all files
+  // 1. Decode all files (0% - 30%)
   const audioBuffers: AudioBuffer[] = [];
-  for (const track of tracks) {
+  for (let i = 0; i < tracks.length; i++) {
+    const track = tracks[i];
     const arrayBuffer = await track.file.arrayBuffer();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
     audioBuffers.push(audioBuffer);
+    
+    // Update progress based on how many tracks decoded
+    const progressStep = 30 / tracks.length;
+    updateProgress(1 + (i + 1) * progressStep);
   }
 
   // 2. Calculate total duration with overlap
-  // Total = Sum(Durations) - (Count-1 * Crossfade)
   const totalRawDuration = audioBuffers.reduce((acc, buf) => acc + buf.duration, 0);
   const totalOverlap = Math.max(0, (audioBuffers.length - 1) * crossfadeDuration);
-  const finalDuration = Math.max(totalRawDuration - totalOverlap, 1); // Ensure at least 1s
+  const finalDuration = Math.max(totalRawDuration - totalOverlap, 1); 
   
   const sampleRate = 44100;
 
-  // 3. Create OfflineContext
+  // 3. Create OfflineContext & Setup Graph (30% - 35%)
+  updateProgress(32);
   const offlineCtx = new OfflineAudioContext(2, Math.ceil(sampleRate * finalDuration), sampleRate);
   
   let currentStartTime = 0;
@@ -112,66 +136,58 @@ export const mergeAudioTracks = async (tracks: AudioTrack[], crossfadeDuration: 
     const source = offlineCtx.createBufferSource();
     source.buffer = buffer;
     
-    // Create a GainNode for volume automation (fading)
     const gainNode = offlineCtx.createGain();
-    
     source.connect(gainNode);
     gainNode.connect(offlineCtx.destination);
     
-    // Get the volume for this specific track (default to 1 if undefined)
     const trackVolume = tracks[index].volume ?? 1.0;
-
-    // Determine actual fade duration for this specific track
-    // (cannot be longer than half the track to avoid conflict between fade-in and fade-out)
     const actualFade = Math.min(crossfadeDuration, buffer.duration / 2);
 
-    // Apply Fade In (if not the first track)
     if (index > 0 && actualFade > 0) {
       gainNode.gain.setValueAtTime(0, currentStartTime);
-      // Ramp to the specific track volume, not just 1
       gainNode.gain.linearRampToValueAtTime(trackVolume, currentStartTime + actualFade);
     } else {
-      // Start at track volume
       gainNode.gain.setValueAtTime(trackVolume, currentStartTime);
     }
 
-    // Apply Fade Out (if not the last track)
     if (index < audioBuffers.length - 1 && actualFade > 0) {
       const fadeOutStart = currentStartTime + buffer.duration - actualFade;
       const fadeOutEnd = currentStartTime + buffer.duration;
-      
-      // We need to schedule the fade out
-      // Ensure we are at the correct volume before fading out
       gainNode.gain.setValueAtTime(trackVolume, fadeOutStart);
       gainNode.gain.linearRampToValueAtTime(0, fadeOutEnd);
     } else {
-      // If no fade out (last track), ensure volume stays constant until end (implicit)
-      // Just to be safe for the "middle" of the track if no fades are happening
       gainNode.gain.setValueAtTime(trackVolume, currentStartTime + actualFade); 
     }
 
     source.start(currentStartTime);
-
-    // Update cursor: The next track starts BEFORE this one ends (by the crossfade amount)
     currentStartTime += (buffer.duration - crossfadeDuration);
-    
-    // Security check: ensure time doesn't go negative if crossfade is huge
     if (currentStartTime < 0) currentStartTime = 0; 
   });
 
+  // 4. Render Audio (35% - 50%)
+  // Rendering is blocking/async in one go, so we jump to 50% when done
+  updateProgress(35);
   const renderedBuffer = await offlineCtx.startRendering();
+  updateProgress(50);
 
-  // 4. Encode to MP3 using Worker
+  // 5. Encode to MP3 using Worker (50% - 100%)
   return new Promise((resolve, reject) => {
     try {
       const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
       const worker = new Worker(URL.createObjectURL(blob));
 
       worker.onmessage = (e) => {
-        const { mp3Data } = e.data;
-        const mp3Blob = new Blob(mp3Data, { type: 'audio/mp3' });
-        resolve(mp3Blob);
-        worker.terminate();
+        const { type, mp3Data, progress } = e.data;
+        
+        if (type === 'progress') {
+            // Map 0-1 from worker to 50-100 for overall progress
+            updateProgress(50 + (progress * 50));
+        } else if (type === 'done') {
+            const mp3Blob = new Blob(mp3Data, { type: 'audio/mp3' });
+            updateProgress(100);
+            resolve(mp3Blob);
+            worker.terminate();
+        }
       };
 
       worker.onerror = (e) => {
@@ -179,7 +195,6 @@ export const mergeAudioTracks = async (tracks: AudioTrack[], crossfadeDuration: 
         worker.terminate();
       };
 
-      // Extract channels for worker
       const channels = [];
       for (let i = 0; i < renderedBuffer.numberOfChannels; i++) {
         channels.push(renderedBuffer.getChannelData(i));
