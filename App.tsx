@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, Music, Download, Wand2, AudioWaveform, Loader2, Sliders, FileText, Image as ImageIcon, PlayCircle, Video, Copy, ExternalLink, Trash2 } from 'lucide-react';
+import { Upload, Music, Download, Wand2, AudioWaveform, Loader2, Sliders, FileText, Image as ImageIcon, PlayCircle, Video, Copy, ExternalLink, Trash2, RefreshCw } from 'lucide-react';
 import { AudioTrack, MergeStatus, AiMetadata } from './types';
 import { TrackList } from './components/TrackList';
 import { mergeAudioTracks, calculateOptimalVolume } from './services/audioService';
-import { generateMixMetadata } from './services/geminiService';
+import { generateMixMetadata, regenerateMixText, regenerateMixImage } from './services/geminiService';
 
 const App: React.FC = () => {
   const [tracks, setTracks] = useState<AudioTrack[]>([]);
@@ -12,6 +12,8 @@ const App: React.FC = () => {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [aiMetadata, setAiMetadata] = useState<AiMetadata | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
+  const [isRegeneratingText, setIsRegeneratingText] = useState(false);
+  const [isRegeneratingImage, setIsRegeneratingImage] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [analyzingTrackId, setAnalyzingTrackId] = useState<string | null>(null);
@@ -168,6 +170,42 @@ const App: React.FC = () => {
     }
   };
 
+  const handleRegenerateText = async () => {
+    if (tracks.length === 0) return;
+    setIsRegeneratingText(true);
+    try {
+      const names = tracks.map(t => t.name);
+      const newTextData = await regenerateMixText(names);
+      
+      setAiMetadata(prev => prev ? {
+        ...prev,
+        title: newTextData.title,
+        description: newTextData.description,
+        videoSearchPrompt: newTextData.videoSearchPrompt,
+        coverArtPrompt: newTextData.coverArtPrompt // Update prompt for future image gen
+      } : newTextData);
+    } catch (err) {
+      console.error("Text Regeneration failed", err);
+    } finally {
+      setIsRegeneratingText(false);
+    }
+  };
+
+  const handleRegenerateImage = async () => {
+    if (!aiMetadata?.coverArtPrompt) return;
+    setIsRegeneratingImage(true);
+    try {
+      const base64 = await regenerateMixImage(aiMetadata.coverArtPrompt);
+      if (base64) {
+        setAiMetadata(prev => prev ? { ...prev, coverImageBase64: base64 } : null);
+      }
+    } catch (err) {
+      console.error("Image Regeneration failed", err);
+    } finally {
+      setIsRegeneratingImage(false);
+    }
+  };
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -188,7 +226,7 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-50 p-4 md:p-8">
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-4xl mx-auto">
         
         {/* Header */}
         <header className="mb-10 text-center">
@@ -295,7 +333,7 @@ const App: React.FC = () => {
                   </div>
                   <div>
                     <h4 className="font-semibold text-indigo-100">AI Assistant</h4>
-                    <p className="text-xs text-indigo-300">Genera titolo, copertina (16:9) e cerca video</p>
+                    <p className="text-xs text-indigo-300">Genera titolo YouTube, copertina 16:9 e SEO</p>
                   </div>
                </div>
                <button 
@@ -316,38 +354,90 @@ const App: React.FC = () => {
                 <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-600/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
 
                 <div className="flex flex-col md:flex-row gap-6 relative z-10">
-                  {aiMetadata.coverImageBase64 && (
-                    <div className="group relative w-full md:w-80 md:aspect-video flex-shrink-0 bg-slate-900 rounded-lg overflow-hidden border border-slate-700 shadow-xl">
-                        <img 
-                          src={`data:image/jpeg;base64,${aiMetadata.coverImageBase64}`} 
-                          alt="Cover Art" 
-                          className="w-full h-full object-cover"
-                        />
-                        {/* Overlay button for quick download */}
-                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                            <button
-                              onClick={() => {
-                                const link = document.createElement('a');
-                                link.href = `data:image/jpeg;base64,${aiMetadata.coverImageBase64}`;
-                                link.download = `${aiMetadata.title.replace(/[^a-z0-9]/gi, '_')}_thumbnail.jpg`;
-                                link.click();
-                              }}
-                              className="p-2 bg-white/20 hover:bg-white/30 rounded-full text-white backdrop-blur-sm transition-colors"
-                              title="Scarica immagine"
-                            >
-                               <Download size={24} />
-                            </button>
-                        </div>
-                    </div>
-                  )}
+                  <div className="flex-shrink-0 flex flex-col gap-2">
+                    {aiMetadata.coverImageBase64 ? (
+                      <div className="group relative w-full md:w-72 md:aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 shadow-xl">
+                          <img 
+                            src={`data:image/jpeg;base64,${aiMetadata.coverImageBase64}`} 
+                            alt="Cover Art" 
+                            className={`w-full h-full object-cover transition-opacity ${isRegeneratingImage ? 'opacity-50' : 'opacity-100'}`}
+                          />
+                          {isRegeneratingImage && (
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                  <Loader2 className="animate-spin text-white" size={32} />
+                              </div>
+                          )}
+                          
+                          {/* Overlay buttons */}
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                              <button
+                                onClick={() => {
+                                  const link = document.createElement('a');
+                                  link.href = `data:image/jpeg;base64,${aiMetadata.coverImageBase64}`;
+                                  link.download = `${aiMetadata.title.replace(/[^a-z0-9]/gi, '_')}_thumbnail.jpg`;
+                                  link.click();
+                                }}
+                                className="p-2 bg-white/20 hover:bg-white/30 rounded-full text-white backdrop-blur-sm transition-colors"
+                                title="Scarica immagine"
+                              >
+                                 <Download size={20} />
+                              </button>
+                              
+                              <button
+                                onClick={handleRegenerateImage}
+                                disabled={isRegeneratingImage}
+                                className="p-2 bg-white/20 hover:bg-white/30 rounded-full text-white backdrop-blur-sm transition-colors"
+                                title="Rigenera immagine"
+                              >
+                                 <RefreshCw size={20} className={isRegeneratingImage ? 'animate-spin' : ''} />
+                              </button>
+                          </div>
+                      </div>
+                    ) : (
+                       <div className="w-full md:w-72 md:aspect-video bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center">
+                          {isRegeneratingImage ? <Loader2 className="animate-spin text-slate-400" /> : <ImageIcon className="text-slate-600" size={32} />}
+                       </div>
+                    )}
+                    
+                    {/* Explicit Regenerate Button if overlay is missed */}
+                    <button 
+                       onClick={handleRegenerateImage}
+                       disabled={isRegeneratingImage || !aiMetadata.coverArtPrompt}
+                       className="md:hidden w-full py-2 bg-slate-700 hover:bg-slate-600 text-xs text-slate-200 rounded flex items-center justify-center gap-2"
+                    >
+                       <RefreshCw size={12} className={isRegeneratingImage ? 'animate-spin' : ''} />
+                       Rigenera Copertina
+                    </button>
+                  </div>
                   
-                  <div className="flex flex-col justify-between flex-grow">
+                  <div className="flex flex-col justify-between flex-grow min-w-0">
                       <div>
-                        <div className="flex items-center gap-2 mb-2">
-                           <span className="text-xs font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">AI GENERATED</span>
+                        <div className="flex items-center justify-between mb-2">
+                           <div className="flex items-center gap-2">
+                             <span className="text-xs font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">AI GENERATED</span>
+                           </div>
+                           <button 
+                             onClick={handleRegenerateText}
+                             disabled={isRegeneratingText}
+                             className="text-xs text-indigo-300 hover:text-white flex items-center gap-1.5 transition-colors px-2 py-1 rounded hover:bg-indigo-500/20"
+                           >
+                             <RefreshCw size={12} className={isRegeneratingText ? 'animate-spin' : ''} />
+                             Rigenera Testi
+                           </button>
                         </div>
-                        <h3 className="text-2xl font-bold text-white mb-2">{aiMetadata.title}</h3>
-                        <p className="text-slate-300 text-sm leading-relaxed mb-4">{aiMetadata.description}</p>
+                        
+                        {isRegeneratingText ? (
+                          <div className="animate-pulse space-y-3 mb-4">
+                             <div className="h-8 bg-slate-700 rounded w-3/4"></div>
+                             <div className="h-4 bg-slate-700 rounded w-full"></div>
+                             <div className="h-4 bg-slate-700 rounded w-5/6"></div>
+                          </div>
+                        ) : (
+                          <>
+                            <h3 className="text-2xl font-bold text-white mb-2 leading-tight">{aiMetadata.title}</h3>
+                            <p className="text-slate-300 text-sm leading-relaxed mb-4 whitespace-pre-line">{aiMetadata.description}</p>
+                          </>
+                        )}
                       </div>
 
                       <div className="flex flex-wrap gap-3">
@@ -368,7 +458,7 @@ const App: React.FC = () => {
                         
                         <button
                           onClick={() => {
-                            const text = `Titolo: ${aiMetadata.title}\nDescrizione: ${aiMetadata.description}\nVideo Prompt: ${aiMetadata.videoSearchPrompt || ''}`;
+                            const text = `Titolo: ${aiMetadata.title}\n\nDescrizione:\n${aiMetadata.description}\n\nVideo Background Search:\n${aiMetadata.videoSearchPrompt || ''}`;
                             const blob = new Blob([text], { type: 'text/plain' });
                             const link = document.createElement('a');
                             link.href = URL.createObjectURL(blob);
@@ -383,19 +473,19 @@ const App: React.FC = () => {
                       </div>
 
                       {/* Video Prompt Section */}
-                      {aiMetadata.videoSearchPrompt && (
+                      {aiMetadata.videoSearchPrompt && !isRegeneratingText && (
                         <div className="mt-4 pt-4 border-t border-slate-700/50">
                           <div className="flex items-center gap-2 mb-2">
                              <Video size={16} className="text-indigo-400" />
                              <span className="text-xs font-semibold text-slate-400 uppercase">Suggerimento Video Background</span>
                           </div>
-                          <div className="flex items-center gap-2">
-                             <div className="flex-1 bg-slate-900/60 border border-slate-700 rounded px-3 py-2 text-sm text-slate-300 font-mono truncate">
+                          <div className="flex items-center gap-2 min-w-0">
+                             <div className="flex-1 bg-slate-900/60 border border-slate-700 rounded px-3 py-2 text-sm text-slate-300 font-mono truncate min-w-0">
                                 {aiMetadata.videoSearchPrompt}
                              </div>
                              <button 
                                 onClick={() => copyToClipboard(aiMetadata.videoSearchPrompt || '')} 
-                                className={`p-2 rounded transition-colors ${copied ? 'bg-green-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}`} 
+                                className={`p-2 rounded flex-shrink-0 transition-colors ${copied ? 'bg-green-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}`} 
                                 title="Copia prompt"
                              >
                                 <Copy size={16} />
@@ -404,7 +494,7 @@ const App: React.FC = () => {
                                 href={`https://www.pexels.com/search/videos/${aiMetadata.videoSearchPrompt}`} 
                                 target="_blank" 
                                 rel="noreferrer" 
-                                className="p-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white transition-colors" 
+                                className="p-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white transition-colors flex-shrink-0" 
                                 title="Cerca su Pexels"
                              >
                                 <ExternalLink size={16} />

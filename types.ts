@@ -18,4 +18,5 @@ export interface AiMetadata {
   description: string;
   coverImageBase64?: string;
   videoSearchPrompt?: string;
+  coverArtPrompt?: string;
 }
