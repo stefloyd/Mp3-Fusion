@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { Upload, Music, Download, Wand2, AudioWaveform, Loader2, Sliders, FileText, Image as ImageIcon, PlayCircle, Video, Copy, ExternalLink, Trash2, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Upload, Music, Download, Wand2, AudioWaveform, Loader2, Sliders, FileText, Image as ImageIcon, PlayCircle, Video, Copy, ExternalLink, Trash2, RefreshCw, CloudRain, X } from 'lucide-react';
 import { AudioTrack, MergeStatus, AiMetadata } from './types';
 import { TrackList } from './components/TrackList';
 import { mergeAudioTracks, calculateOptimalVolume } from './services/audioService';
 import { generateMixMetadata, regenerateMixText, regenerateMixImage } from './services/geminiService';
+import { SOUND_TYPES, SoundType, generateSoundEffect } from './services/soundGenerator';
 
 const App: React.FC = () => {
   const [tracks, setTracks] = useState<AudioTrack[]>([]);
@@ -18,7 +19,63 @@ const App: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const [analyzingTrackId, setAnalyzingTrackId] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
+  const [showCancelModal, setShowCancelModal] = useState(false);
   
+  // Ambient Effect Modal State
+  const [showEffectModal, setShowEffectModal] = useState(false);
+  const [selectedEffect, setSelectedEffect] = useState<SoundType>('rain_light');
+  const [effectDuration, setEffectDuration] = useState<number>(60);
+  const [isGeneratingEffect, setIsGeneratingEffect] = useState(false);
+  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+     // Cleanup preview audio when modal closes or component unmounts
+     return () => {
+        if (previewAudioRef.current) {
+           previewAudioRef.current.pause();
+           previewAudioRef.current = null;
+        }
+     };
+  }, [showEffectModal]);
+
+  const handlePreviewEffect = async () => {
+     if (isPlayingPreview) {
+        if (previewAudioRef.current) {
+           previewAudioRef.current.pause();
+           previewAudioRef.current = null;
+        }
+        setIsPlayingPreview(false);
+        return;
+     }
+
+     setIsPlayingPreview(true);
+     try {
+        // Generate a short 5-second preview
+        const file = await generateSoundEffect(selectedEffect, 5);
+        const url = URL.createObjectURL(file);
+        const audio = new Audio(url);
+        
+        audio.onended = () => {
+           setIsPlayingPreview(false);
+           URL.revokeObjectURL(url);
+        };
+        
+        audio.onerror = () => {
+           setIsPlayingPreview(false);
+           URL.revokeObjectURL(url);
+           console.error("Error playing preview");
+        };
+
+        audio.play();
+        previewAudioRef.current = audio;
+     } catch (e) {
+        console.error("Failed to generate preview", e);
+        setIsPlayingPreview(false);
+     }
+  };
+
   // Crossfade state (default 3 seconds)
   const [crossfade, setCrossfade] = useState<number>(3);
 
@@ -34,7 +91,11 @@ const App: React.FC = () => {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const files = Array.from(e.target.files) as File[];
-      
+      addFilesToTracks(files);
+    }
+  };
+
+  const addFilesToTracks = (files: File[]) => {
       const newTracks: AudioTrack[] = files.map(file => ({
         id: Math.random().toString(36).substring(7),
         file,
@@ -71,7 +132,20 @@ const App: React.FC = () => {
           console.error("Error calculating duration", error);
         }
       });
-    }
+  };
+
+  const handleAddEffect = async () => {
+      setIsGeneratingEffect(true);
+      try {
+          const file = await generateSoundEffect(selectedEffect, effectDuration);
+          addFilesToTracks([file]);
+          setShowEffectModal(false);
+      } catch (e) {
+          console.error("Failed to generate effect", e);
+          setErrorMsg("Errore nella generazione dell'effetto audio.");
+      } finally {
+          setIsGeneratingEffect(false);
+      }
   };
 
   const removeTrack = (id: string) => {
@@ -133,6 +207,11 @@ const App: React.FC = () => {
       setErrorMsg("Seleziona almeno 2 file da unire.");
       return;
     }
+    
+    // Create controller BEFORE setting status to ensure it's ready
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    
     setErrorMsg(null);
     setStatus(MergeStatus.PROCESSING);
     setProgress(0);
@@ -140,7 +219,8 @@ const App: React.FC = () => {
     try {
       const blob = await mergeAudioTracks(tracks, crossfade, (percent) => {
           setProgress(Math.round(percent));
-      });
+      }, controller.signal);
+      
       setMergedBlob(blob);
       
       // Create preview URL
@@ -149,10 +229,32 @@ const App: React.FC = () => {
       
       setStatus(MergeStatus.COMPLETED);
     } catch (err: any) {
-      console.error(err);
-      setErrorMsg("Errore durante l'unione: " + (err.message || "Errore sconosciuto"));
-      setStatus(MergeStatus.ERROR);
+      if (err.name === 'AbortError' || err.message === 'Operation cancelled') {
+          console.log("Merge cancelled by user");
+          setStatus(MergeStatus.IDLE);
+          setProgress(0);
+      } else {
+          console.error("Merge error:", err);
+          setErrorMsg("Errore durante l'unione: " + (err.message || "Errore sconosciuto"));
+          setStatus(MergeStatus.ERROR);
+      }
+    } finally {
+        abortControllerRef.current = null;
     }
+  };
+
+  const handleCancel = (e?: React.MouseEvent) => {
+      e?.preventDefault();
+      e?.stopPropagation();
+      setShowCancelModal(true);
+  };
+
+  const confirmCancel = () => {
+      if (abortControllerRef.current) {
+          console.log("Aborting operation via modal...");
+          abortControllerRef.current.abort();
+      }
+      setShowCancelModal(false);
   };
 
   const handleAiGeneration = async () => {
@@ -224,6 +326,31 @@ const App: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
+  // Calculate estimates
+  const estimates = React.useMemo(() => {
+    if (tracks.length === 0) return { duration: 0, size: 0 };
+    
+    const totalRawDuration = tracks.reduce((acc, t) => acc + (t.duration || 0), 0);
+    const overlaps = Math.max(0, tracks.length - 1);
+    const totalOverlapDuration = overlaps * crossfade;
+    const finalDuration = Math.max(0, totalRawDuration - totalOverlapDuration);
+    
+    // 128kbps = 16KB/s
+    const sizeBytes = finalDuration * 16000;
+    const sizeMB = sizeBytes / (1024 * 1024);
+    
+    return {
+      duration: finalDuration,
+      size: sizeMB
+    };
+  }, [tracks, crossfade]);
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-50 p-4 md:p-8">
       <div className="max-w-4xl mx-auto">
@@ -247,26 +374,137 @@ const App: React.FC = () => {
         <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-6 md:p-8 shadow-xl">
           
           {/* Upload Area */}
-          <div className="relative border-2 border-dashed border-slate-600 rounded-xl p-8 text-center hover:border-indigo-500 hover:bg-slate-800 transition-all group cursor-pointer">
-            <input 
-              type="file" 
-              multiple 
-              accept=".mp3,audio/mpeg" 
-              onChange={handleFileUpload} 
-              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-            />
-            <div className="flex flex-col items-center pointer-events-none">
-              <div className="p-3 bg-slate-700 rounded-full text-slate-300 mb-4 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
-                <Upload size={24} />
+          <div className="flex flex-col md:flex-row gap-4 mb-6">
+            <div className="relative flex-1 border-2 border-dashed border-slate-600 rounded-xl p-8 text-center hover:border-indigo-500 hover:bg-slate-800 transition-all group cursor-pointer">
+              <input 
+                type="file" 
+                multiple 
+                accept=".mp3,audio/mpeg" 
+                onChange={handleFileUpload} 
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              />
+              <div className="flex flex-col items-center pointer-events-none">
+                <div className="p-3 bg-slate-700 rounded-full text-slate-300 mb-4 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                  <Upload size={24} />
+                </div>
+                <p className="text-lg font-medium text-slate-200">
+                  Clicca o trascina i file MP3 qui
+                </p>
+                <p className="text-sm text-slate-500 mt-1">
+                  Supporta file MP3 multipli
+                </p>
               </div>
-              <p className="text-lg font-medium text-slate-200">
-                Clicca o trascina i file MP3 qui
-              </p>
-              <p className="text-sm text-slate-500 mt-1">
-                Supporta file MP3 multipli
-              </p>
             </div>
+
+            <button 
+              onClick={() => setShowEffectModal(true)}
+              className="flex-shrink-0 md:w-48 border-2 border-dashed border-slate-600 rounded-xl p-4 flex flex-col items-center justify-center hover:border-emerald-500 hover:bg-slate-800 transition-all group"
+            >
+               <div className="p-3 bg-slate-700 rounded-full text-slate-300 mb-2 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                  <CloudRain size={24} />
+               </div>
+               <span className="font-medium text-slate-200">Aggiungi Effetto</span>
+               <span className="text-xs text-slate-500 mt-1">Pioggia, Tuoni, ecc.</span>
+            </button>
           </div>
+
+          {/* Cancel Confirmation Modal */}
+          {showCancelModal && (
+             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl text-center">
+                   <div className="flex justify-center mb-4">
+                      <div className="p-3 bg-red-900/30 rounded-full text-red-400">
+                         <X size={32} />
+                      </div>
+                   </div>
+                   <h3 className="text-xl font-bold text-white mb-2">Annullare l'elaborazione?</h3>
+                   <p className="text-slate-400 mb-6">
+                      Sei sicuro di voler interrompere l'unione dei file? Il progresso attuale andrà perso.
+                   </p>
+                   
+                   <div className="flex gap-3">
+                      <button
+                         onClick={() => setShowCancelModal(false)}
+                         className="flex-1 py-2.5 bg-slate-700 hover:bg-slate-600 text-white font-medium rounded-xl transition-colors"
+                      >
+                         No, continua
+                      </button>
+                      <button
+                         onClick={confirmCancel}
+                         className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white font-medium rounded-xl transition-colors"
+                      >
+                         Sì, annulla
+                      </button>
+                   </div>
+                </div>
+             </div>
+          )}
+
+          {/* Effect Modal */}
+          {showEffectModal && (
+             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+                   <div className="flex justify-between items-center mb-4">
+                      <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                         <CloudRain size={20} className="text-emerald-400" />
+                         Genera Effetto Ambiente
+                      </h3>
+                      <button onClick={() => setShowEffectModal(false)} className="text-slate-400 hover:text-white">
+                         <X size={20} />
+                      </button>
+                   </div>
+                   
+                   <div className="space-y-4">
+                      <div>
+                         <label className="block text-sm font-medium text-slate-300 mb-1">Tipo di Suono</label>
+                         <div className="flex gap-2">
+                            <select 
+                               value={selectedEffect}
+                               onChange={(e) => setSelectedEffect(e.target.value as SoundType)}
+                               className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                            >
+                               {SOUND_TYPES.map(type => (
+                                  <option key={type.id} value={type.id}>{type.label}</option>
+                               ))}
+                            </select>
+                            <button
+                               onClick={handlePreviewEffect}
+                               className={`p-2.5 rounded-lg border transition-colors ${isPlayingPreview ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}`}
+                               title={isPlayingPreview ? "Stop Anteprima" : "Ascolta Anteprima (5s)"}
+                            >
+                               {isPlayingPreview ? <Loader2 className="animate-spin" size={20} /> : <PlayCircle size={20} />}
+                            </button>
+                         </div>
+                      </div>
+                      
+                      <div>
+                         <label className="block text-sm font-medium text-slate-300 mb-1">Durata (secondi)</label>
+                         <div className="flex items-center gap-3">
+                            <input 
+                               type="range" 
+                               min="10" 
+                               max="300" 
+                               step="10"
+                               value={effectDuration}
+                               onChange={(e) => setEffectDuration(parseInt(e.target.value))}
+                               className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                            />
+                            <span className="text-sm font-mono text-emerald-400 w-12 text-right">{effectDuration}s</span>
+                         </div>
+                      </div>
+
+                      <button
+                         onClick={handleAddEffect}
+                         disabled={isGeneratingEffect}
+                         className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                         {isGeneratingEffect ? <Loader2 className="animate-spin" size={18} /> : <Wand2 size={18} />}
+                         {isGeneratingEffect ? 'Generazione...' : 'Aggiungi alla Playlist'}
+                      </button>
+                   </div>
+                </div>
+             </div>
+          )}
 
           {/* Error Message */}
           {errorMsg && (
@@ -321,6 +559,21 @@ const App: React.FC = () => {
                 <p className="text-xs text-slate-400 mt-2">
                    Regola la sovrapposizione tra le tracce. Un valore più alto crea una transizione più dolce.
                 </p>
+                
+                {/* Estimates Display */}
+                <div className="mt-4 pt-4 border-t border-slate-700 flex justify-between items-center text-sm">
+                    <div className="text-slate-400">
+                        Stima finale:
+                    </div>
+                    <div className="flex gap-4 font-mono text-slate-200">
+                        <span>
+                            ⏱️ {formatDuration(estimates.duration)}
+                        </span>
+                        <span>
+                            💾 ~{estimates.size.toFixed(2)} MB
+                        </span>
+                    </div>
+                </div>
              </div>
           )}
 
@@ -546,18 +799,25 @@ const App: React.FC = () => {
               )}
 
               <button
-                onClick={handleMerge}
-                disabled={tracks.length < 2 || status === MergeStatus.PROCESSING}
-                className={`flex-1 sm:flex-none px-6 py-3 rounded-xl font-semibold flex items-center justify-center space-x-2 transition-all ${
+                type="button"
+                onClick={(e) => {
+                    if (status === MergeStatus.PROCESSING) {
+                        handleCancel(e);
+                    } else {
+                        handleMerge();
+                    }
+                }}
+                disabled={tracks.length < 2}
+                className={`flex-1 sm:flex-none px-6 py-3 rounded-xl font-semibold flex items-center justify-center space-x-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                   status === MergeStatus.PROCESSING
-                    ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                    ? 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/20'
                     : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20'
                 }`}
               >
                 {status === MergeStatus.PROCESSING ? (
                   <>
-                    <Loader2 className="animate-spin" size={20} />
-                    <span>{progress}%</span>
+                    <X size={20} />
+                    <span>Annulla ({progress}%)</span>
                   </>
                 ) : (
                   <>

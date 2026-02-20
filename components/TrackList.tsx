@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { AudioTrack } from '../types';
-import { Trash2, GripVertical, Music, ArrowUp, ArrowDown, Volume2, VolumeX, Wand2, Loader2 } from 'lucide-react';
+import { Trash2, GripVertical, Music, ArrowUp, ArrowDown, Volume2, VolumeX, Wand2, Loader2, Play, Pause } from 'lucide-react';
 
 interface TrackListProps {
   tracks: AudioTrack[];
@@ -19,6 +19,54 @@ const formatDuration = (seconds?: number) => {
 };
 
 export const TrackList: React.FC<TrackListProps> = ({ tracks, onRemove, onMove, onVolumeChange, onAutoLevel, analyzingTrackId }) => {
+  const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    // Cleanup audio on unmount
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  const togglePlay = (track: AudioTrack) => {
+    if (playingTrackId === track.id) {
+      // Stop playing
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      setPlayingTrackId(null);
+    } else {
+      // Start playing new track
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      
+      const url = URL.createObjectURL(track.file);
+      const audio = new Audio(url);
+      audio.volume = Math.min(track.volume, 1.0); // Respect track volume (capped at 1.0 for HTML Audio)
+      
+      audio.onended = () => {
+        setPlayingTrackId(null);
+        URL.revokeObjectURL(url);
+      };
+      
+      audio.onerror = () => {
+        setPlayingTrackId(null);
+        URL.revokeObjectURL(url);
+        console.error("Error playing track");
+      };
+
+      audio.play();
+      audioRef.current = audio;
+      setPlayingTrackId(track.id);
+    }
+  };
+
   if (tracks.length === 0) return null;
 
   return (
@@ -30,18 +78,24 @@ export const TrackList: React.FC<TrackListProps> = ({ tracks, onRemove, onMove, 
         {tracks.map((track, index) => (
           <div 
             key={track.id} 
-            className="group flex flex-col md:flex-row items-center justify-between p-3 bg-slate-800 border border-slate-700 rounded-lg hover:border-indigo-500 transition-colors gap-3"
+            className={`group flex flex-col md:flex-row items-center justify-between p-3 bg-slate-800 border rounded-lg transition-colors gap-3 ${playingTrackId === track.id ? 'border-emerald-500 bg-slate-800/80' : 'border-slate-700 hover:border-indigo-500'}`}
           >
             {/* Left: Drag, Icon, Name */}
             <div className="flex items-center space-x-3 w-full md:w-auto overflow-hidden">
               <div className="cursor-grab text-slate-500 hover:text-slate-300 flex-shrink-0">
                 <GripVertical size={20} />
               </div>
-              <div className="p-2 bg-indigo-900/50 rounded-full text-indigo-400 flex-shrink-0">
-                <Music size={18} />
-              </div>
+              
+              <button 
+                onClick={() => togglePlay(track)}
+                className={`p-2 rounded-full flex-shrink-0 transition-colors ${playingTrackId === track.id ? 'bg-emerald-500 text-white' : 'bg-indigo-900/50 text-indigo-400 hover:bg-indigo-600 hover:text-white'}`}
+                title={playingTrackId === track.id ? "Pausa" : "Ascolta anteprima"}
+              >
+                {playingTrackId === track.id ? <Pause size={18} /> : <Play size={18} />}
+              </button>
+
               <div className="truncate min-w-0">
-                <p className="text-sm font-medium text-slate-100 truncate">
+                <p className={`text-sm font-medium truncate ${playingTrackId === track.id ? 'text-emerald-400' : 'text-slate-100'}`}>
                   {track.file.name}
                 </p>
                 <div className="flex items-center space-x-2 text-xs text-slate-400">

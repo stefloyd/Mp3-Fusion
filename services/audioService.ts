@@ -93,7 +93,8 @@ export const calculateOptimalVolume = async (file: File, targetRms: number = 0.1
 export const mergeAudioTracks = async (
   tracks: AudioTrack[], 
   crossfadeDuration: number = 0,
-  onProgress?: (percentage: number) => void
+  onProgress?: (percentage: number) => void,
+  signal?: AbortSignal
 ): Promise<Blob> => {
   if (tracks.length === 0) throw new Error("No tracks to merge");
 
@@ -109,6 +110,11 @@ export const mergeAudioTracks = async (
   // 1. Decode all files (0% - 30%)
   const audioBuffers: AudioBuffer[] = [];
   for (let i = 0; i < tracks.length; i++) {
+    if (signal?.aborted) {
+        audioCtx.close();
+        throw new DOMException("Operation cancelled", "AbortError");
+    }
+
     const track = tracks[i];
     const arrayBuffer = await track.file.arrayBuffer();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
@@ -117,6 +123,11 @@ export const mergeAudioTracks = async (
     // Update progress based on how many tracks decoded
     const progressStep = 30 / tracks.length;
     updateProgress(1 + (i + 1) * progressStep);
+  }
+
+  if (signal?.aborted) {
+    audioCtx.close();
+    throw new DOMException("Operation cancelled", "AbortError");
   }
 
   // 2. Calculate total duration with overlap
@@ -167,14 +178,33 @@ export const mergeAudioTracks = async (
   // 4. Render Audio (35% - 50%)
   // Rendering is blocking/async in one go, so we jump to 50% when done
   updateProgress(35);
+  
+  if (signal?.aborted) {
+    audioCtx.close();
+    throw new DOMException("Operation cancelled", "AbortError");
+  }
+
   const renderedBuffer = await offlineCtx.startRendering();
   updateProgress(50);
+
+  if (signal?.aborted) {
+    audioCtx.close();
+    throw new DOMException("Operation cancelled", "AbortError");
+  }
 
   // 5. Encode to MP3 using Worker (50% - 100%)
   return new Promise((resolve, reject) => {
     try {
       const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
       const worker = new Worker(URL.createObjectURL(blob));
+
+      if (signal) {
+        signal.addEventListener('abort', () => {
+            worker.terminate();
+            audioCtx.close();
+            reject(new DOMException("Operation cancelled", "AbortError"));
+        });
+      }
 
       worker.onmessage = (e) => {
         const { type, mp3Data, progress } = e.data;
@@ -187,12 +217,14 @@ export const mergeAudioTracks = async (
             updateProgress(100);
             resolve(mp3Blob);
             worker.terminate();
+            audioCtx.close();
         }
       };
 
       worker.onerror = (e) => {
         reject(new Error("Encoding failed: " + e.message));
         worker.terminate();
+        audioCtx.close();
       };
 
       const channels = [];
@@ -207,6 +239,7 @@ export const mergeAudioTracks = async (
 
     } catch (err) {
       reject(err);
+      audioCtx.close();
     }
   });
 };
